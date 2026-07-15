@@ -5,6 +5,7 @@ namespace App\Http\Controllers;
 use App\Models\Ambulance;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\DB;
+use Illuminate\Support\Facades\Http;
 use Illuminate\Support\Facades\Validator;
 
 class RadarController extends Controller
@@ -47,7 +48,7 @@ class RadarController extends Controller
     }
 
     /**
-     * Mengonversi nama tempat/alamat menjadi koordinat GPS (Geocoding Mock).
+     * Mengonversi nama tempat/alamat menjadi koordinat GPS menggunakan OpenStreetMap Nominatim API.
      */
     public function getGeocode(Request $request)
     {
@@ -59,6 +60,41 @@ class RadarController extends Controller
             return response()->json(['errors' => $validator->errors()], 422);
         }
 
+        $addressQuery = $request->address;
+        
+        // Prioritaskan area Bandung jika belum disebutkan
+        if (!str_contains(strtolower($addressQuery), 'bandung')) {
+            $addressQuery .= ', Bandung';
+        }
+
+        try {
+            $response = Http::withHeaders([
+                'User-Agent' => 'AmbulanBDG/1.0 (contact: admin@ambulanbdg.com)'
+            ])->timeout(5)->get('https://nominatim.openstreetmap.org/search', [
+                'q' => $addressQuery,
+                'format' => 'json',
+                'limit' => 1,
+                'addressdetails' => 1
+            ]);
+
+            if ($response->successful()) {
+                $results = $response->json();
+                if (!empty($results)) {
+                    $firstResult = $results[0];
+                    return response()->json([
+                        'status' => 'success',
+                        'input_address' => $request->address,
+                        'latitude' => (float) $firstResult['lat'],
+                        'longitude' => (float) $firstResult['lon'],
+                        'formatted_address' => $firstResult['display_name'],
+                    ]);
+                }
+            }
+        } catch (\Exception $e) {
+            \Illuminate\Support\Facades\Log::error("Geocoding failed: " . $e->getMessage());
+        }
+
+        // Fallback mock values in case Nominatim fails or is offline
         $address = strtolower($request->address);
         $latitude = -6.917464; // Default Bandung Center
         $longitude = 107.619123;
@@ -88,7 +124,7 @@ class RadarController extends Controller
     }
 
     /**
-     * Mengonversi koordinat GPS menjadi nama jalan/alamat tekstual (Reverse Geocoding Mock).
+     * Mengonversi koordinat GPS menjadi nama jalan/alamat tekstual menggunakan OpenStreetMap Nominatim API.
      */
     public function getReverseGeocode(Request $request)
     {
@@ -104,12 +140,34 @@ class RadarController extends Controller
         $latitude = (float) $request->latitude;
         $longitude = (float) $request->longitude;
 
-        // Hitung jarak sederhana ke spot-spot populer Bandung
+        try {
+            $response = Http::withHeaders([
+                'User-Agent' => 'AmbulanBDG/1.0 (contact: admin@ambulanbdg.com)'
+            ])->timeout(5)->get('https://nominatim.openstreetmap.org/reverse', [
+                'lat' => $latitude,
+                'lon' => $longitude,
+                'format' => 'json',
+            ]);
+
+            if ($response->successful()) {
+                $result = $response->json();
+                if (!empty($result) && isset($result['display_name'])) {
+                    return response()->json([
+                        'status' => 'success',
+                        'latitude' => $latitude,
+                        'longitude' => $longitude,
+                        'formatted_address' => $result['display_name'],
+                    ]);
+                }
+            }
+        } catch (\Exception $e) {
+            \Illuminate\Support\Facades\Log::error("Reverse geocoding failed: " . $e->getMessage());
+        }
+
+        // Fallback mock values
         $formattedAddress = "Jl. Ir. H. Juanda No.1, Dago, Kecamatan Coblong, Kota Bandung, Jawa Barat 40132";
 
-        // Gedung Sate coordinates
         $distToGedungSate = sqrt(pow($latitude - (-6.902481), 2) + pow($longitude - 107.618810, 2));
-        // Cihampelas Walk coordinates
         $distToCihampelas = sqrt(pow($latitude - (-6.896582), 2) + pow($longitude - 107.604215, 2));
 
         if ($distToGedungSate < 0.005) {

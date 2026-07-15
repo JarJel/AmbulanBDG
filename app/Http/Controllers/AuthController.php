@@ -26,11 +26,17 @@ class AuthController extends Controller
             $request->session()->regenerate();
 
             $user = Auth::user();
-            if ($user->role === 'driver' || $user->role === 'nurse') {
+            if ($user->role === 'super_admin') {
+                return redirect()->intended(route('superadmin.dashboard'));
+            } elseif ($user->role === 'institution_admin') {
+                return redirect()->intended(route('admin.dashboard'));
+            } elseif ($user->role === 'driver') {
                 return redirect()->intended(route('driver.dashboard'));
+            } elseif ($user->role === 'nurse') {
+                return redirect()->intended(route('nurse.dashboard'));
+            } else {
+                return redirect()->intended(route('customer.dashboard'));
             }
-
-            return redirect()->intended(route('home'));
         }
 
         return back()->withErrors([
@@ -61,11 +67,17 @@ class AuthController extends Controller
 
         Auth::login($user);
 
-        if ($user->role === 'driver' || $user->role === 'nurse') {
+        if ($user->role === 'super_admin') {
+            return redirect(route('superadmin.dashboard'));
+        } elseif ($user->role === 'institution_admin') {
+            return redirect(route('admin.dashboard'));
+        } elseif ($user->role === 'driver') {
             return redirect(route('driver.dashboard'));
+        } elseif ($user->role === 'nurse') {
+            return redirect(route('nurse.dashboard'));
+        } else {
+            return redirect(route('customer.dashboard'));
         }
-
-        return redirect(route('home'));
     }
 
     public function logout(Request $request)

@@ -42,3 +42,11 @@ Broadcast::channel('orders.{orderId}', function ($user, $orderId) {
     
     return false;
 });
+
+Broadcast::channel('superadmin.alerts', function ($user) {
+    return $user->role === 'super_admin';
+});
+
+Broadcast::channel('institutions.{institutionId}.alerts', function ($user, $institutionId) {
+    return (int) $user->institution_id === (int) $institutionId;
+});

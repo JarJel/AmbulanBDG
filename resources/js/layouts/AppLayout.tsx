@@ -24,22 +24,48 @@ export default function AppLayout({ children, activeMenu = '' }: AppLayoutProps)
         }
 
         switch (resolvedRole) {
-            case 'driver':
-            case 'nurse':
+            case 'super_admin':
                 return [
-                    { name: 'Tugas Aktif', url: '/driver/dashboard', key: 'dashboard' },
+                    { name: 'Dashboard', url: '/superadmin/dashboard', key: 'dashboard' },
+                    { name: 'Institusi', url: '/superadmin/institutions', key: 'institutions' },
+                    { name: 'Armada', url: '/superadmin/ambulances', key: 'ambulances' },
+                    { name: 'Pengguna', url: '/superadmin/users', key: 'users' },
+                    { name: 'Verifikasi Mitra', url: '/superadmin/approvals', key: 'approvals' },
+                    { name: 'Audit Logs', url: '/superadmin/audit-logs', key: 'audit-logs' },
                     { name: 'Portal Utama', url: '/', key: 'home' }
                 ];
-            case 'admin':
+            case 'institution_admin':
                 return [
-                    { name: 'Proposal Event', url: '/admin/dashboard', key: 'event' },
-                    { name: 'Kelola Armada', url: '/admin/ambulances', key: 'ambulances' },
+                    { name: 'Dashboard', url: '/admin/dashboard', key: 'dashboard' },
+                    { name: 'Armada', url: '/admin/ambulances', key: 'ambulances' },
+                    { name: 'Staf', url: '/admin/staff', key: 'staff' },
+                    { name: 'Proposal Event', url: '/admin/proposals', key: 'proposals' },
+                    { name: 'Dokumen', url: '/admin/documents', key: 'documents' },
+                    { name: 'Audit Logs', url: '/admin/logs', key: 'logs' },
+                    { name: 'Portal Utama', url: '/', key: 'home' }
+                ];
+            case 'driver':
+                return [
+                    { name: 'Tugas Aktif', url: '/driver/dashboard', key: 'dashboard' },
+                    { name: 'Riwayat Trip', url: '/driver/history', key: 'history' },
+                    { name: 'Profil SIM', url: '/driver/profile', key: 'profile' },
+                    { name: 'Portal Utama', url: '/', key: 'home' }
+                ];
+            case 'nurse':
+                return [
+                    { name: 'Tugas Aktif', url: '/nurse/dashboard', key: 'dashboard' },
+                    { name: 'Riwayat Pendampingan', url: '/nurse/history', key: 'history' },
+                    { name: 'Profil STR', url: '/nurse/profile', key: 'profile' },
                     { name: 'Portal Utama', url: '/', key: 'home' }
                 ];
             case 'customer':
             default:
                 return [
-                    { name: 'Cari Ambulans', url: '/', key: 'booking' }
+                    { name: 'Radar Ambulans', url: '/', key: 'booking' },
+                    { name: 'Dashboard Saya', url: '/customer/dashboard', key: 'dashboard' },
+                    { name: 'Pesanan Saya', url: '/customer/orders', key: 'orders' },
+                    { name: 'Profil', url: '/customer/profile', key: 'profile' },
+                    { name: 'Notifikasi', url: '/customer/notifications', key: 'notifications' }
                 ];
         }
     };

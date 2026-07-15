@@ -12,12 +12,18 @@ interface MapProps {
     center: [number, number];
     zoom?: number;
     markers?: MapMarker[];
+    routingBetween?: {
+        start: [number, number];
+        end: [number, number];
+        color?: string;
+    } | null;
 }
 
-export default function Map({ center, zoom = 13, markers = [] }: MapProps) {
+export default function Map({ center, zoom = 13, markers = [], routingBetween = null }: MapProps) {
     const mapRef = useRef<HTMLDivElement>(null);
     const mapInstance = useRef<L.Map | null>(null);
     const markersGroup = useRef<L.LayerGroup | null>(null);
+    const routingLayer = useRef<L.Polyline | null>(null);
 
     // Inisialisasi Peta (Hanya Klien / useEffect)
     useEffect(() => {
@@ -55,6 +61,68 @@ export default function Map({ center, zoom = 13, markers = [] }: MapProps) {
             mapInstance.current.setView(center, mapInstance.current.getZoom());
         }
     }, [center]);
+
+    const routingKey = routingBetween 
+        ? `${routingBetween.start[0]},${routingBetween.start[1]}-${routingBetween.end[0]},${routingBetween.end[1]}-${routingBetween.color}` 
+        : '';
+
+    // Pembaruan Jalur Rute Navigasi (Routing)
+    useEffect(() => {
+        if (!mapInstance.current) return;
+
+        // Hapus rute lama jika ada
+        if (routingLayer.current) {
+            mapInstance.current.removeLayer(routingLayer.current);
+            routingLayer.current = null;
+        }
+
+        if (!routingBetween) return;
+
+        const { start, end, color = '#D9383A' } = routingBetween;
+
+        const fetchRoute = async () => {
+            try {
+                // OSRM menggunakan koordinat format: lng,lat
+                const url = `https://router.project-osrm.org/route/v1/driving/${start[1]},${start[0]};${end[1]},${end[0]}?overview=full&geometries=geojson`;
+                const res = await fetch(url);
+                const data = await res.json();
+                
+                if (data.code === 'Ok' && data.routes && data.routes.length > 0) {
+                    const coords = data.routes[0].geometry.coordinates.map((coord: [number, number]) => [coord[1], coord[0]]); // ubah ke format Leaflet [lat, lng]
+                    
+                    if (mapInstance.current) {
+                        routingLayer.current = L.polyline(coords, {
+                            color: color,
+                            weight: 5,
+                            opacity: 0.85,
+                            lineJoin: 'round'
+                        }).addTo(mapInstance.current);
+                    }
+                }
+            } catch (err) {
+                console.error("Gagal memuat rute navigasi OSRM:", err);
+                
+                // Fallback: Gambar garis putus-putus lurus jika OSRM mati
+                if (mapInstance.current) {
+                    routingLayer.current = L.polyline([start, end], {
+                        color: color,
+                        weight: 4,
+                        dashArray: '5, 10',
+                        opacity: 0.7
+                    }).addTo(mapInstance.current);
+                }
+            }
+        };
+
+        fetchRoute();
+
+        return () => {
+            if (routingLayer.current && mapInstance.current) {
+                mapInstance.current.removeLayer(routingLayer.current);
+                routingLayer.current = null;
+            }
+        };
+    }, [routingKey]);
 
     // Pembaruan Penanda Peta (Markers) secara Dinamis
     useEffect(() => {

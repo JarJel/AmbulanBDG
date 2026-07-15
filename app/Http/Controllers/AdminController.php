@@ -10,10 +10,16 @@ use App\Models\StaffProfile;
 use App\Models\TripStatusHistory;
 use App\Models\User;
 use App\Models\VehicleDocument;
+use App\Models\RateHistory;
+use App\Models\DocumentVerification;
+use App\Models\ApprovalLog;
+use App\Models\VehicleChecklist;
 use App\Notifications\OrderStatusUpdated;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Validator;
+use Illuminate\Support\Str;
+use Carbon\Carbon;
 
 class AdminController extends Controller
 {
@@ -288,6 +294,449 @@ class AdminController extends Controller
                 'message' => "Proposal event berhasil diperbarui menjadi {$request->review_status}.",
                 'proposal' => $proposal,
                 'order' => Order::with('ambulance')->find($order->id),
+            ]);
+        });
+    }
+
+    /**
+     * Tambah Armada Ambulans Baru (Mendukung Draft & Upload STNK/KIR).
+     */
+    public function postCreateAmbulance(Request $request)
+    {
+        $isDraft = filter_var($request->input('is_draft'), FILTER_VALIDATE_BOOLEAN);
+
+        $validator = Validator::make($request->all(), [
+            'plate_number' => ['required', 'string', 'unique:ambulances,plate_number', 'regex:/^[A-Z]{1,2}\s\d{1,4}\s[A-Z]{1,3}$/i'],
+            'category' => 'required|in:emergency,non_emergency,corpse',
+            'brand' => 'required|string',
+            'year' => 'required|integer|min:1900|max:' . (date('Y') + 1),
+            'capacity' => 'required|integer|min:1',
+            'base_fare' => 'nullable|numeric|min:0',
+            'price_per_km' => 'nullable|numeric|min:0',
+            'is_free_service_eligible' => 'nullable|boolean',
+            'stnk_file' => $isDraft ? 'nullable|file|mimes:pdf,jpg,jpeg,png|max:5120' : 'required|file|mimes:pdf,jpg,jpeg,png|max:5120',
+            'kir_file' => 'nullable|file|mimes:pdf,jpg,jpeg,png|max:5120',
+            'operasional_file' => $isDraft ? 'nullable|file|mimes:pdf,jpg,jpeg,png|max:5120' : 'required|file|mimes:pdf,jpg,jpeg,png|max:5120',
+        ], [
+            'plate_number.regex' => 'Format plat nomor tidak valid (contoh: D 1111 RSH).'
+        ]);
+
+        if ($validator->fails()) {
+            return response()->json(['errors' => $validator->errors()], 422);
+        }
+
+        return DB::transaction(function () use ($request, $isDraft) {
+            $user = $request->user();
+            $institutionId = $user->institution_id ?? 1; // Dinkes default atau instansi pengguna
+
+            // Default location (Gedung Sate Bandung)
+            $longitude = 107.619123;
+            $latitude = -6.917464;
+
+            $ambulance = Ambulance::create([
+                'institution_id' => $institutionId,
+                'plate_number' => strtoupper($request->plate_number),
+                'category' => $request->category,
+                'status' => 'offline',
+                'brand' => $request->brand,
+                'year' => $request->year,
+                'capacity' => $request->capacity,
+                'base_fare' => $request->base_fare ?? 0.00,
+                'price_per_km' => $request->price_per_km ?? 0.00,
+                'is_free_service_eligible' => filter_var($request->is_free_service_eligible, FILTER_VALIDATE_BOOLEAN),
+                'is_draft' => $isDraft,
+                'verification_status' => 'pending_verification',
+                'current_location' => DB::raw("Point({$longitude}, {$latitude})"),
+            ]);
+
+            // Save Rate History
+            RateHistory::create([
+                'ambulance_id' => $ambulance->id,
+                'old_base_fare' => 0.00,
+                'new_base_fare' => $ambulance->base_fare,
+                'old_price_per_km' => 0.00,
+                'new_price_per_km' => $ambulance->price_per_km,
+                'changed_by_user_id' => $user->id,
+            ]);
+
+            // Upload files
+            $files = ['stnk_file' => 'STNK', 'kir_file' => 'KIR', 'operasional_file' => 'Izin Operasional'];
+            foreach ($files as $inputName => $docType) {
+                if ($request->hasFile($inputName)) {
+                    $path = $request->file($inputName)->store('documents/ambulances', 'public');
+                    DocumentVerification::create([
+                        'verifiable_id' => $ambulance->id,
+                        'verifiable_type' => Ambulance::class,
+                        'document_type' => $docType,
+                        'file_path' => $path,
+                        'expiry_date' => $request->input($inputName . '_expiry') ? Carbon::parse($request->input($inputName . '_expiry'))->toDateString() : null,
+                        'status' => 'pending',
+                    ]);
+                }
+            }
+
+            AuditLogger::log($user->id, 'create_ambulance', "Membuat armada baru {$ambulance->plate_number} (Draft: " . ($isDraft ? 'Ya' : 'Tidak') . ").", $user, $ambulance);
+
+            return response()->json([
+                'status' => 'success',
+                'message' => 'Armada ambulans berhasil ditambahkan.',
+                'ambulance' => $ambulance
+            ]);
+        });
+    }
+
+    /**
+     * Duplikasi/Clone Data Armada Ambulans.
+     */
+    public function postCloneAmbulance(Request $request, $id)
+    {
+        $validator = Validator::make($request->all(), [
+            'plate_number' => ['required', 'string', 'unique:ambulances,plate_number', 'regex:/^[A-Z]{1,2}\s\d{1,4}\s[A-Z]{1,3}$/i'],
+        ], [
+            'plate_number.regex' => 'Format plat nomor tidak valid (contoh: D 1111 RSH).'
+        ]);
+
+        if ($validator->fails()) {
+            return response()->json(['errors' => $validator->errors()], 422);
+        }
+
+        $source = Ambulance::findOrFail($id);
+
+        return DB::transaction(function () use ($source, $request) {
+            $user = $request->user();
+
+            $clone = Ambulance::create([
+                'institution_id' => $source->institution_id,
+                'plate_number' => strtoupper($request->plate_number),
+                'category' => $source->category,
+                'status' => 'offline',
+                'brand' => $source->brand,
+                'year' => $source->year,
+                'capacity' => $source->capacity,
+                'base_fare' => $source->base_fare,
+                'price_per_km' => $source->price_per_km,
+                'is_free_service_eligible' => $source->is_free_service_eligible,
+                'is_draft' => true, // default clone as draft for editing
+                'verification_status' => 'pending_verification',
+                'current_location' => DB::raw("Point(107.619123, -6.917464)"),
+            ]);
+
+            RateHistory::create([
+                'ambulance_id' => $clone->id,
+                'old_base_fare' => 0.00,
+                'new_base_fare' => $clone->base_fare,
+                'old_price_per_km' => 0.00,
+                'new_price_per_km' => $clone->price_per_km,
+                'changed_by_user_id' => $user->id,
+            ]);
+
+            AuditLogger::log($user->id, 'clone_ambulance', "Menduplikasi armada {$source->plate_number} menjadi {$clone->plate_number}.", $user, $clone);
+
+            return response()->json([
+                'status' => 'success',
+                'message' => 'Armada ambulans berhasil diduplikasi sebagai draft.',
+                'ambulance' => $clone
+            ]);
+        });
+    }
+
+    /**
+     * Tambah Staf Baru (Driver/Nurse) dengan Dual-role & Invitation Link.
+     */
+    public function postCreateStaff(Request $request)
+    {
+        $validator = Validator::make($request->all(), [
+            'name' => 'required|string|max:255',
+            'email' => 'required|email|unique:users,email',
+            'phone' => 'required|string|max:20',
+            'nik' => 'required|digits:16',
+            'role' => 'required|in:driver,nurse,dual',
+            'default_ambulance_id' => 'nullable|exists:ambulances,id',
+            'sim_file' => 'nullable|required_if:role,driver,dual|file|mimes:pdf,jpg,jpeg,png|max:5120',
+            'str_file' => 'nullable|required_if:role,nurse,dual|file|mimes:pdf,jpg,jpeg,png|max:5120',
+            'ktp_file' => 'required|file|mimes:pdf,jpg,jpeg,png|max:5120',
+        ]);
+
+        if ($validator->fails()) {
+            return response()->json(['errors' => $validator->errors()], 422);
+        }
+
+        return DB::transaction(function () use ($request) {
+            $user = $request->user();
+            $institutionId = $user->institution_id ?? 1;
+
+            $invitationToken = Str::uuid()->toString();
+
+            // Create Staff User (Primary role is driver if dual, nurse if nurse)
+            $primaryRole = $request->role === 'dual' ? 'driver' : $request->role;
+
+            $staffUser = User::create([
+                'name' => $request->name,
+                'email' => $request->email,
+                'phone' => $request->phone,
+                'nik' => $request->nik,
+                'role' => $primaryRole,
+                'password' => bcrypt(Str::random(16)), // random pass, password set later via invite
+                'institution_id' => $institutionId,
+                'invitation_token' => $invitationToken,
+            ]);
+
+            // Save staff profile metadata
+            $staffProfile = StaffProfile::create([
+                'user_id' => $staffUser->id,
+                'staff_type' => $primaryRole,
+                'license_number' => $request->role === 'nurse' ? 'STR-' . Str::random(8) : 'SIM-' . Str::random(8),
+                'license_expiry' => now()->addYears(3)->toDateString(),
+                'verification_status' => 'pending',
+            ]);
+
+            // Upload KTP
+            if ($request->hasFile('ktp_file')) {
+                $path = $request->file('ktp_file')->store('documents/staff', 'public');
+                DocumentVerification::create([
+                    'verifiable_id' => $staffUser->id,
+                    'verifiable_type' => User::class,
+                    'document_type' => 'KTP',
+                    'file_path' => $path,
+                    'status' => 'pending',
+                ]);
+            }
+
+            // Upload SIM (Driver / Dual)
+            if ($request->hasFile('sim_file')) {
+                $path = $request->file('sim_file')->store('documents/staff', 'public');
+                DocumentVerification::create([
+                    'verifiable_id' => $staffUser->id,
+                    'verifiable_type' => User::class,
+                    'document_type' => 'SIM',
+                    'file_path' => $path,
+                    'expiry_date' => now()->addYears(5)->toDateString(),
+                    'status' => 'pending',
+                ]);
+            }
+
+            // Upload STR (Nurse / Dual)
+            if ($request->hasFile('str_file')) {
+                $path = $request->file('str_file')->store('documents/staff', 'public');
+                DocumentVerification::create([
+                    'verifiable_id' => $staffUser->id,
+                    'verifiable_type' => User::class,
+                    'document_type' => 'STR',
+                    'file_path' => $path,
+                    'expiry_date' => now()->addYears(3)->toDateString(),
+                    'status' => 'pending',
+                ]);
+            }
+
+            // Bind default ambulance if supplied
+            if ($request->default_ambulance_id) {
+                $ambulance = Ambulance::find($request->default_ambulance_id);
+                if ($ambulance) {
+                    if ($primaryRole === 'driver') {
+                        $ambulance->current_driver_id = $staffUser->id;
+                    } else {
+                        $ambulance->current_nurse_id = $staffUser->id;
+                    }
+                    $ambulance->save();
+                }
+            }
+
+            $inviteLink = route('register') . '?invitation_token=' . $invitationToken;
+
+            AuditLogger::log($user->id, 'create_staff', "Membuat akun staf baru {$staffUser->name} (Role: {$request->role}).", $user, $staffUser);
+
+            return response()->json([
+                'status' => 'success',
+                'message' => 'Staf baru berhasil didaftarkan.',
+                'staff' => $staffUser,
+                'invitation_link' => $inviteLink
+            ]);
+        });
+    }
+
+    /**
+     * Deaktivasi / Soft-delete Akun Staf.
+     */
+    public function postDeactivateStaff(Request $request, $id)
+    {
+        $staffUser = User::findOrFail($id);
+        $user = $request->user();
+
+        return DB::transaction(function () use ($staffUser, $user) {
+            if ($staffUser->deactivated_at) {
+                $staffUser->deactivated_at = null;
+                $message = 'Akun staf berhasil diaktifkan kembali.';
+                $action = 'reactivate_staff';
+            } else {
+                $staffUser->deactivated_at = now();
+                $message = 'Akun staf berhasil dinonaktifkan.';
+                $action = 'deactivate_staff';
+
+                // Force log out active session
+                DB::table('sessions')->where('user_id', $staffUser->id)->delete();
+            }
+            $staffUser->save();
+
+            AuditLogger::log($user->id, $action, "Mengubah status aktif staf {$staffUser->name}.", $user, $staffUser);
+
+            return response()->json([
+                'status' => 'success',
+                'message' => $message,
+                'staff' => $staffUser
+            ]);
+        });
+    }
+
+    /**
+     * Dapatkan Daftar Sesi/Device Aktif dari Staf.
+     */
+    public function getStaffSessions($id)
+    {
+        $sessions = DB::table('sessions')
+            ->where('user_id', $id)
+            ->select('id', 'ip_address', 'user_agent', 'last_activity')
+            ->get()
+            ->map(function ($sess) {
+                return [
+                    'id' => $sess->id,
+                    'ip_address' => $sess->ip_address,
+                    'device' => $sess->user_agent,
+                    'last_active' => Carbon::createFromTimestamp($sess->last_activity)->toIso8601String()
+                ];
+            });
+
+        return response()->json([
+            'status' => 'success',
+            'sessions' => $sessions
+        ]);
+    }
+
+    /**
+     * Paksa Keluar (Force Logout) Device Staf Tertentu.
+     */
+    public function postLogoutStaffDevice(Request $request, $id)
+    {
+        $validator = Validator::make($request->all(), [
+            'session_id' => 'required|string'
+        ]);
+
+        if ($validator->fails()) {
+            return response()->json(['errors' => $validator->errors()], 422);
+        }
+
+        DB::table('sessions')
+            ->where('user_id', $id)
+            ->where('id', $request->session_id)
+            ->delete();
+
+        AuditLogger::log($request->user()->id, 'force_logout_device', "Memaksa keluar device/sesi staf ID: {$id}.", $request->user(), User::find($id));
+
+        return response()->json([
+            'status' => 'success',
+            'message' => 'Device berhasil dilogout paksa.'
+        ]);
+    }
+
+    /**
+     * Persetujuan / Penolakan Massal Super Admin (Bulk Approvals).
+     */
+    public function postBulkApprovals(Request $request)
+    {
+        $validator = Validator::make($request->all(), [
+            'targets' => 'required|array',
+            'targets.*.id' => 'required|integer',
+            'targets.*.type' => 'required|in:ambulance,staff',
+            'targets.*.status' => 'required|in:verified,rejected',
+            'targets.*.notes' => 'required_if:targets.*.status,rejected|nullable|string',
+        ]);
+
+        if ($validator->fails()) {
+            return response()->json(['errors' => $validator->errors()], 422);
+        }
+
+        return DB::transaction(function () use ($request) {
+            $user = $request->user();
+            $processed = [];
+
+            foreach ($request->targets as $item) {
+                if ($item['type'] === 'ambulance') {
+                    $ambulance = Ambulance::findOrFail($item['id']);
+                    $ambulance->verification_status = $item['status'] === 'verified' ? 'verified' : 'rejected';
+                    
+                    if ($item['status'] === 'verified') {
+                        $ambulance->status = 'standby';
+                        
+                        // Set all its documents to verified
+                        DocumentVerification::where('verifiable_id', $ambulance->id)
+                            ->where('verifiable_type', Ambulance::class)
+                            ->update([
+                                'status' => 'verified',
+                                'verified_by_user_id' => $user->id,
+                                'verified_at' => now()
+                            ]);
+                    } else {
+                        $ambulance->status = 'offline';
+                        
+                        // Set pending documents to rejected
+                        DocumentVerification::where('verifiable_id', $ambulance->id)
+                            ->where('verifiable_type', Ambulance::class)
+                            ->where('status', 'pending')
+                            ->update([
+                                'status' => 'rejected',
+                                'rejection_notes' => $item['notes'] ?? 'Ditolak oleh Super Admin.',
+                                'verified_by_user_id' => $user->id,
+                                'verified_at' => now()
+                            ]);
+                    }
+                    $ambulance->save();
+
+                    ApprovalLog::create([
+                        'action_type' => $item['status'] === 'verified' ? 'approve' : 'reject',
+                        'target_id' => $ambulance->id,
+                        'target_type' => Ambulance::class,
+                        'notes' => $item['notes'] ?? null,
+                        'user_id' => $user->id,
+                    ]);
+
+                    AuditLogger::log($user->id, 'bulk_verify_ambulance', "Super Admin memverifikasi armada {$ambulance->plate_number} status: {$item['status']}.", $user, $ambulance);
+                    $processed[] = "Ambulans {$ambulance->plate_number}";
+
+                } else if ($item['type'] === 'staff') {
+                    $staffUser = User::findOrFail($item['id']);
+                    
+                    // Update staff profile verification
+                    $profile = StaffProfile::where('user_id', $staffUser->id)->first();
+                    if ($profile) {
+                        $profile->verification_status = $item['status'] === 'verified' ? 'approved' : 'rejected';
+                        $profile->save();
+                    }
+
+                    // Update polymorphic documents status
+                    DocumentVerification::where('verifiable_id', $staffUser->id)
+                        ->where('verifiable_type', User::class)
+                        ->update([
+                            'status' => $item['status'] === 'verified' ? 'verified' : 'rejected',
+                            'rejection_notes' => $item['status'] === 'rejected' ? ($item['notes'] ?? 'Ditolak.') : null,
+                            'verified_by_user_id' => $user->id,
+                            'verified_at' => now(),
+                        ]);
+
+                    ApprovalLog::create([
+                        'action_type' => $item['status'] === 'verified' ? 'approve' : 'reject',
+                        'target_id' => $staffUser->id,
+                        'target_type' => User::class,
+                        'notes' => $item['notes'] ?? null,
+                        'user_id' => $user->id,
+                    ]);
+
+                    AuditLogger::log($user->id, 'bulk_verify_staff', "Super Admin memverifikasi staf {$staffUser->name} status: {$item['status']}.", $user, $staffUser);
+                    $processed[] = "Staf {$staffUser->name}";
+                }
+            }
+
+            return response()->json([
+                'status' => 'success',
+                'message' => 'Persetujuan massal berhasil diproses untuk: ' . implode(', ', $processed)
             ]);
         });
     }

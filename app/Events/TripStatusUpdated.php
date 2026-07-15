@@ -28,9 +28,15 @@ class TripStatusUpdated implements ShouldBroadcastNow
      */
     public function broadcastOn(): array
     {
-        return [
+        $channels = [
             new PrivateChannel('orders.' . $this->order->id),
         ];
+
+        if ($this->order->guest_session_token) {
+            $channels[] = new Channel('orders.guest.' . $this->order->id . '.' . $this->order->guest_session_token);
+        }
+
+        return $channels;
     }
 
     /**

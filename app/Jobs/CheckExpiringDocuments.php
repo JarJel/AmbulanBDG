@@ -25,6 +25,45 @@ class CheckExpiringDocuments implements ShouldQueue
     {
         $this->checkVehicleDocuments();
         $this->checkStaffLicenses();
+        $this->checkPolymorphicDocuments();
+    }
+
+    /**
+     * Check new polymorphic documents expiring within 30 days.
+     */
+    private function checkPolymorphicDocuments(): void
+    {
+        $limitDate = now()->addDays(30)->toDateString();
+        $today = now()->toDateString();
+        
+        $expiringDocs = \App\Models\DocumentVerification::where('expiry_date', '<=', $limitDate)
+            ->where('expiry_date', '>', $today)
+            ->where('status', 'verified')
+            ->get();
+            
+        foreach ($expiringDocs as $doc) {
+            $admins = collect();
+            if ($doc->verifiable_type === \App\Models\Ambulance::class) {
+                $ambulance = \App\Models\Ambulance::find($doc->verifiable_id);
+                if ($ambulance && $ambulance->institution) {
+                    $admins = $ambulance->institution->admins ?? collect();
+                }
+            } else if ($doc->verifiable_type === \App\Models\User::class) {
+                $u = \App\Models\User::find($doc->verifiable_id);
+                if ($u && $u->institution) {
+                    $admins = $u->institution->admins ?? collect();
+                }
+            }
+            
+            foreach ($admins as $admin) {
+                // Broadcast warning using Reverb
+                try {
+                    broadcast(new \App\Events\SlaBreached(new \App\Models\Order(), "Dokumen {$doc->document_type} (ID Verifiable: {$doc->verifiable_id}) mendekati tanggal kedaluwarsa dalam 30 hari!"));
+                } catch (\Exception $e) {
+                    \Illuminate\Support\Facades\Log::warning("Gagal mengirim broadcast dokumen kedaluwarsa: " . $e->getMessage());
+                }
+            }
+        }
     }
 
     /**

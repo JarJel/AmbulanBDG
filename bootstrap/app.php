@@ -23,6 +23,7 @@ return Application::configure(basePath: dirname(__DIR__))
 
         $middleware->alias([
             'role' => \App\Http\Middleware\CheckRole::class,
+            'guest.track' => \App\Http\Middleware\VerifyGuestTrackingToken::class,
         ]);
 
         $middleware->validateCsrfTokens(except: [

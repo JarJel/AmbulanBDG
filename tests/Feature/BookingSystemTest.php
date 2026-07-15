@@ -97,6 +97,52 @@ test('it assigns nearest standby ambulance for SOS orders and moves to awaiting_
     expect(Ambulance::find($ambulanceA->id)->status)->toBe('on_duty');
 });
 
+test('it does not assign private ambulances (is_free_service_eligible = false) to SOS orders', function () {
+    \Illuminate\Support\Facades\Queue::fake();
+    \Illuminate\Support\Facades\Event::fake([\App\Events\TripStatusUpdated::class]);
+
+    // 1. Private Ambulance closer to the user (is_free_service_eligible = false)
+    $privateAmbulance = new Ambulance();
+    $privateAmbulance->institution_id = $this->institution->id;
+    $privateAmbulance->plate_number = 'D 7777 PVT';
+    $privateAmbulance->category = 'emergency';
+    $privateAmbulance->status = 'standby';
+    $privateAmbulance->is_free_service_eligible = false;
+    $privateAmbulance->current_location = DB::raw("Point(107.619123, -6.917464)"); // Closer
+    $privateAmbulance->save();
+
+    // 2. Public/Fasyankes Ambulance farther away (is_free_service_eligible = true)
+    $publicAmbulance = new Ambulance();
+    $publicAmbulance->institution_id = $this->institution->id;
+    $publicAmbulance->plate_number = 'D 8888 PUB';
+    $publicAmbulance->category = 'emergency';
+    $publicAmbulance->status = 'standby';
+    $publicAmbulance->is_free_service_eligible = true;
+    $publicAmbulance->current_location = DB::raw("Point(107.630000, -6.920000)"); // Farther
+    $publicAmbulance->save();
+
+    // Request SOS
+    $response = $this->postJson('/api/orders/sos', [
+        'user_id' => $this->customer->id,
+        'pickup_latitude' => -6.917500, // Very close to private ambulance
+        'pickup_longitude' => 107.619100,
+        'pickup_address' => 'Gedung Sate Bandung',
+    ]);
+
+    $response->assertStatus(201);
+    $orderId = $response->json('order.id');
+
+    // Confirm that the farther public ambulance is assigned, NOT the private one
+    $this->assertDatabaseHas('orders', [
+        'id' => $orderId,
+        'ambulance_id' => $publicAmbulance->id,
+        'status' => 'awaiting_driver_response',
+    ]);
+
+    expect(Ambulance::find($publicAmbulance->id)->status)->toBe('dispatching');
+    expect(Ambulance::find($privateAmbulance->id)->status)->toBe('standby'); // Unchanged
+});
+
 test('it handles SLA reassign when driver does not accept SOS order within SLA time', function () {
     \Illuminate\Support\Facades\Queue::fake();
     \Illuminate\Support\Facades\Event::fake([\App\Events\TripStatusUpdated::class]);
@@ -306,4 +352,51 @@ test('it allows driver to confirm and update trip status to completion', functio
     expect(Order::find($order->id)->status)->toBe('completed');
     // Ambulans harus kembali standby setelah order completed
     expect(Ambulance::find($ambulance->id)->status)->toBe('standby');
+});
+
+test('it processes guest SOS dispatch and saves patient details successfully', function () {
+    \Illuminate\Support\Facades\Queue::fake();
+
+    // Buat Ambulan Emergency Standby
+    $ambulance = new Ambulance();
+    $ambulance->institution_id = $this->institution->id;
+    $ambulance->plate_number = 'D 7777 SOS';
+    $ambulance->category = 'emergency';
+    $ambulance->status = 'standby';
+    $ambulance->current_location = DB::raw("Point(107.619123, -6.917464)");
+    $ambulance->save();
+
+    // 1. Post Guest SOS Call
+    $response = $this->postJson('/api/orders/sos/guest', [
+        'pickup_latitude' => -6.917464,
+        'pickup_longitude' => 107.619123,
+        'pickup_address' => 'Gedung Sate, Bandung',
+        'guest_phone' => '08999999999',
+    ]);
+
+    $response->assertStatus(201);
+    $response->assertJsonStructure(['status', 'order', 'guest_session_token']);
+
+    $orderId = $response->json('order.id');
+    $token = $response->json('guest_session_token');
+
+    expect($orderId)->toBeGreaterThan(0);
+    expect($token)->not->toBeNull();
+
+    $order = Order::find($orderId);
+    expect($order->user_id)->toBeNull();
+    expect($order->guest_phone)->toBe('08999999999');
+    expect($order->guest_session_token)->toBe($token);
+
+    // 2. Post Patient Details
+    $patientResponse = $this->postJson("/api/orders/{$orderId}/patient-details", [
+        'patient_name' => 'Budi Santoso',
+        'patient_age' => 45,
+        'condition_notes' => 'Sesak nafas berat',
+        'secondary_emergency_contact' => '08222222222',
+        'guest_session_token' => $token,
+    ]);
+
+    $patientResponse->assertStatus(200);
+    expect(Order::with('patientDetail')->find($orderId)->patientDetail->patient_name)->toBe('Budi Santoso');
 });

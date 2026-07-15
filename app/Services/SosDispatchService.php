@@ -37,6 +37,7 @@ class SosDispatchService
                 $ambulance = Ambulance::query()
                     ->where('id', $ambulanceId)
                     ->where('status', 'standby')
+                    ->where('is_free_service_eligible', true)
                     ->lockForUpdate()
                     ->first();
             }
@@ -45,6 +46,7 @@ class SosDispatchService
             if (!$ambulance) {
                 $ambulance = Ambulance::query()
                     ->where('status', 'standby')
+                    ->where('is_free_service_eligible', true)
                     ->when($excludeIds, fn ($q) => $q->whereNotIn('id', $excludeIds))
                     ->select('*')
                     ->selectRaw('ST_Distance_Sphere(current_location, Point(?, ?)) AS distance', [$lng, $lat])
@@ -60,6 +62,16 @@ class SosDispatchService
 
             // Update ambulance status to dispatching
             $ambulance->update(['status' => 'dispatching']);
+
+            // Prioritas SOS: bebaskan jadwal rental terjadwal (sewa) yang bentrok dalam 2 jam ke depan
+            Order::where('ambulance_id', $ambulance->id)
+                ->where('order_type', 'sewa')
+                ->whereIn('status', ['pending', 'confirmed'])
+                ->where('scheduled_start_time', '<=', now()->addHours(2))
+                ->update([
+                    'ambulance_id' => null,
+                    'status' => 'pending' // kembali ke pool pencarian
+                ]);
 
             // Update order status to awaiting_driver_response
             $order->update([
@@ -86,9 +98,14 @@ class SosDispatchService
             ]);
 
             // Send Notification to Customer
-            $user = User::find($order->user_id);
-            if ($user) {
-                $user->notify(new OrderStatusUpdated($order));
+            if ($order->user_id) {
+                $user = User::find($order->user_id);
+                if ($user) {
+                    $user->notify(new OrderStatusUpdated($order));
+                }
+            } else if ($order->guest_phone) {
+                // Fallback: Kirim notifikasi simulasi via SMS/WhatsApp Gateway
+                \Illuminate\Support\Facades\Log::info("SMS/WhatsApp Gateway to guest phone {$order->guest_phone}: Panggilan darurat diterima. Ambulans sedang meluncur! Lacak di: " . route('orders.guest.tracking', [$order->id, $order->guest_session_token]));
             }
 
             // Dispatch the delayed job (30 seconds SLA)

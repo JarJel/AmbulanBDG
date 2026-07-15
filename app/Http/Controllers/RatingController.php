@@ -33,13 +33,23 @@ class RatingController extends Controller
             ], 400);
         }
 
-        // 2. Validasi kepemilikan order (hanya pemesan asli yang bisa mengulas)
+        // 2. Validasi kepemilikan order (hanya pemesan asli atau guest pemegang token yang bisa mengulas)
         $user = $request->user();
-        if ($user && (int) $order->user_id !== (int) $user->id) {
-            return response()->json([
-                'status' => 'error',
-                'message' => 'Anda tidak memiliki hak akses untuk memberikan ulasan pada pesanan ini.',
-            ], 403);
+        if ($order->user_id) {
+            if (!$user || (int) $order->user_id !== (int) $user->id) {
+                return response()->json([
+                    'status' => 'error',
+                    'message' => 'Anda tidak memiliki hak akses untuk memberikan ulasan pada pesanan ini.',
+                ], 403);
+            }
+        } else {
+            $token = $request->input('guest_session_token') ?? $request->header('X-Guest-Token');
+            if (!$token || $order->guest_session_token !== $token) {
+                return response()->json([
+                    'status' => 'error',
+                    'message' => 'Akses ditolak. Token pelacakan tamu tidak valid.',
+                ], 403);
+            }
         }
 
         // 3. Validasi anti-ulasan ganda

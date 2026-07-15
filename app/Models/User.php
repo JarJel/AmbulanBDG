@@ -21,7 +21,7 @@ use Illuminate\Support\Carbon;
  * @property Carbon|null $created_at
  * @property Carbon|null $updated_at
  */
-#[Fillable(['name', 'email', 'password', 'phone', 'role', 'institution_id'])]
+#[Fillable(['name', 'email', 'password', 'phone', 'role', 'institution_id', 'nik', 'deactivated_at', 'invitation_token'])]
 #[Hidden(['password', 'remember_token'])]
 class User extends Authenticatable
 {
@@ -63,5 +63,21 @@ class User extends Authenticatable
     public function orders()
     {
         return $this->hasMany(Order::class, 'user_id');
+    }
+
+    /**
+     * Get polymorphic documents for staff verification.
+     */
+    public function documents()
+    {
+        return $this->morphMany(DocumentVerification::class, 'verifiable');
+    }
+
+    /**
+     * Get shift vehicle checklists completed by driver.
+     */
+    public function checklists()
+    {
+        return $this->hasMany(VehicleChecklist::class, 'driver_user_id');
     }
 }

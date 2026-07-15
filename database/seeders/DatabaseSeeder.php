@@ -167,6 +167,7 @@ class DatabaseSeeder extends Seeder
         $ambRshs->plate_number = 'D 1111 RSH';
         $ambRshs->category = 'emergency';
         $ambRshs->status = 'standby';
+        $ambRshs->is_free_service_eligible = true;
         $ambRshs->base_fare = 120000.00;
         $ambRshs->price_per_km = 18000.00;
         $ambRshs->current_driver_id = $driverRshs->id;
@@ -179,6 +180,7 @@ class DatabaseSeeder extends Seeder
         $ambBor->plate_number = 'D 2222 BOR';
         $ambBor->category = 'non-emergency';
         $ambBor->status = 'standby';
+        $ambBor->is_free_service_eligible = false;
         $ambBor->base_fare = 150000.00;
         $ambBor->price_per_km = 20000.00;
         $ambBor->current_driver_id = $driverBor->id;
@@ -191,6 +193,7 @@ class DatabaseSeeder extends Seeder
         $ambPmi->plate_number = 'D 3333 PMI';
         $ambPmi->category = 'corpse';
         $ambPmi->status = 'standby';
+        $ambPmi->is_free_service_eligible = true;
         $ambPmi->base_fare = 100000.00;
         $ambPmi->price_per_km = 12000.00;
         $ambPmi->current_driver_id = $driverPmi->id;

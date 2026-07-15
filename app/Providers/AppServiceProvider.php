@@ -18,12 +18,20 @@ class AppServiceProvider extends ServiceProvider
         //
     }
 
-    /**
-     * Bootstrap any application services.
-     */
     public function boot(): void
     {
         $this->configureDefaults();
+
+        \Illuminate\Support\Facades\RateLimiter::for('guest_sos', function (\Illuminate\Http\Request $request) {
+            $ip = $request->ip();
+            $phone = $request->input('guest_phone');
+            $key = $phone ? "guest_sos:{$ip}:{$phone}" : "guest_sos:{$ip}";
+            
+            $limit = app()->environment('local', 'testing') ? 60 : 3;
+            $decayMinutes = app()->environment('local', 'testing') ? 1 : 10;
+            
+            return \Illuminate\Cache\RateLimiting\Limit::perMinutes($decayMinutes, $limit)->by($key);
+        });
     }
 
     /**

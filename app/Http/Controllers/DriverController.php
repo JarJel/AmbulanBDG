@@ -120,13 +120,82 @@ class DriverController extends Controller
         }
 
         // Cari order aktif untuk armada ini
-        $order = Order::where('ambulance_id', $ambulance->id)
+        $order = Order::with(['patientDetail', 'payment'])
+            ->where('ambulance_id', $ambulance->id)
             ->whereIn('status', ['awaiting_driver_response', 'confirmed', 'on_the_way', 'arrived', 'transporting'])
             ->first();
+
+        if ($order) {
+            $coords = DB::selectOne("
+                SELECT 
+                    ST_X(pickup_location) as pickup_lng, 
+                    ST_Y(pickup_location) as pickup_lat,
+                    ST_X(destination_location) as dest_lng,
+                    ST_Y(destination_location) as dest_lat
+                FROM orders 
+                WHERE id = ?
+            ", [$order->id]);
+
+            if ($coords) {
+                $order->pickup_latitude = $coords->pickup_lat;
+                $order->pickup_longitude = $coords->pickup_lng;
+                $order->destination_latitude = $coords->dest_lat;
+                $order->destination_longitude = $coords->dest_lng;
+            }
+        }
 
         return response()->json([
             'status' => 'success',
             'order' => $order,
         ]);
+    }
+
+    /**
+     * Catat checklist kondisi kendaraan sebelum mulai shift/ikat armada oleh driver.
+     */
+    public function postSubmitChecklist(Request $request)
+    {
+        $validator = Validator::make($request->all(), [
+            'ambulance_id' => 'required|exists:ambulances,id',
+            'fuel_status' => 'required|in:fully,half,low',
+            'oxygen_status' => 'required|in:fully,half,low,none',
+            'medical_supplies_status' => 'required|in:complete,incomplete',
+            'notes' => 'nullable|string',
+        ]);
+
+        if ($validator->fails()) {
+            return response()->json(['errors' => $validator->errors()], 422);
+        }
+
+        $user = $request->user();
+        $ambulance = Ambulance::findOrFail($request->ambulance_id);
+
+        return DB::transaction(function () use ($user, $ambulance, $request) {
+            // Save checklist
+            $checklist = \App\Models\VehicleChecklist::create([
+                'ambulance_id' => $ambulance->id,
+                'driver_user_id' => $user->id,
+                'fuel_status' => $request->fuel_status,
+                'oxygen_status' => $request->oxygen_status,
+                'medical_supplies_status' => $request->medical_supplies_status,
+                'notes' => $request->notes,
+            ]);
+
+            // Catat Log Audit
+            AuditLogger::log(
+                $user->id,
+                'submit_vehicle_checklist',
+                "Staf {$user->name} memasukkan checklist shift untuk Ambulans {$ambulance->plate_number}.",
+                $user,
+                $ambulance,
+                $request->only(['fuel_status', 'oxygen_status', 'medical_supplies_status', 'notes'])
+            );
+
+            return response()->json([
+                'status' => 'success',
+                'message' => 'Checklist kondisi kendaraan berhasil disimpan.',
+                'checklist' => $checklist
+            ]);
+        });
     }
 }

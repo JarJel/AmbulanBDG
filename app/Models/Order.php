@@ -13,7 +13,8 @@ use Illuminate\Database\Eloquent\Model;
     'pickup_location', 'pickup_address', 
     'destination_location', 'destination_address', 
     'fare_amount', 'bpjs_number', 'bpjs_status', 'tracking_lost_notified_at',
-    'reminder_sent_at'
+    'reminder_sent_at', 'patient_condition',
+    'guest_phone', 'guest_session_token', 'guest_token_expires_at'
 ])]
 #[Hidden(['pickup_location', 'destination_location'])]
 class Order extends Model
@@ -120,5 +121,13 @@ class Order extends Model
     public function sosLog()
     {
         return $this->hasOne(SosLog::class);
+    }
+
+    /**
+     * Get the patient details associated with the order.
+     */
+    public function patientDetail()
+    {
+        return $this->hasOne(PatientDetail::class);
     }
 }

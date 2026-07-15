@@ -40,9 +40,16 @@ class AmbulanceLocationUpdated implements ShouldBroadcastNow
      */
     public function broadcastOn(): array
     {
-        return [
+        $channels = [
             new PrivateChannel('orders.' . $this->orderId),
         ];
+
+        $order = \App\Models\Order::find($this->orderId);
+        if ($order && $order->guest_session_token) {
+            $channels[] = new Channel('orders.guest.' . $this->orderId . '.' . $order->guest_session_token);
+        }
+
+        return $channels;
     }
 
     /**

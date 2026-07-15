@@ -38,10 +38,15 @@ export default function Welcome({ initialActiveSosOrder = null }: { initialActiv
 
     // 5. Active SOS State
     const [activeSosOrder, setActiveSosOrder] = useState<any | null>(initialActiveSosOrder);
+    const [guestPhone, setGuestPhone] = useState('');
     const [mapZoom, setMapZoom] = useState(13);
 
     // Dapatkan Lokasi GPS Browser saat Load Pertama
     useEffect(() => {
+        if (initialActiveSosOrder && !['completed', 'cancelled'].includes(initialActiveSosOrder.status)) {
+            router.visit(`/orders/${initialActiveSosOrder.id}/tracking`);
+            return;
+        }
         if (initialActiveSosOrder) {
             const lat = parseFloat(initialActiveSosOrder.pickup_latitude ?? -6.902);
             const lng = parseFloat(initialActiveSosOrder.pickup_longitude ?? 107.618);
@@ -296,11 +301,6 @@ export default function Welcome({ initialActiveSosOrder = null }: { initialActiv
     const handleSosDispatch = async () => {
         setMessage(null);
 
-        if (!currentUser) {
-            setMessage({ type: 'error', text: 'Harap masuk (login) terlebih dahulu untuk melakukan panggilan darurat.' });
-            return;
-        }
-
         let lat = userLocation[0];
         let lng = userLocation[1];
         let addr = 'Lokasi Darurat GPS Klien';
@@ -315,6 +315,46 @@ export default function Welcome({ initialActiveSosOrder = null }: { initialActiv
             addr = sosAddress;
         }
 
+        if (!currentUser) {
+            // Tamu (Guest) Flow
+            if (!guestPhone.trim()) {
+                setMessage({ type: 'error', text: 'Harap masukkan Nomor HP Anda terlebih dahulu untuk koordinasi darurat.' });
+                return;
+            }
+
+            const requestBody: any = {
+                guest_phone: guestPhone,
+                pickup_latitude: lat,
+                pickup_longitude: lng,
+                pickup_address: addr
+            };
+            if (selectedAmbulanceId) {
+                const amb = ambulances.find((a: any) => a.id === selectedAmbulanceId);
+                if (amb && amb.is_free_service_eligible) {
+                    requestBody.ambulance_id = selectedAmbulanceId;
+                }
+            }
+
+            try {
+                const res = await fetch('/api/orders/sos/guest', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json', 'Accept': 'application/json' },
+                    body: JSON.stringify(requestBody)
+                });
+                const data = await res.json();
+                if (res.status === 201) {
+                    localStorage.setItem('guest_sos_token_' + data.order.id, data.guest_session_token);
+                    router.visit(`/track/${data.order.id}/${data.guest_session_token}`);
+                } else {
+                    setMessage({ type: 'error', text: data.message || 'Gagal mengirim sinyal SOS.' });
+                }
+            } catch (err) {
+                setMessage({ type: 'error', text: 'Koneksi gagal ke server.' });
+            }
+            return;
+        }
+
+        // Terautentikasi Flow (Standard)
         const requestBody: any = {
             user_id: currentUser.id,
             pickup_latitude: lat,
@@ -322,7 +362,10 @@ export default function Welcome({ initialActiveSosOrder = null }: { initialActiv
             pickup_address: addr
         };
         if (selectedAmbulanceId) {
-            requestBody.ambulance_id = selectedAmbulanceId;
+            const amb = ambulances.find((a: any) => a.id === selectedAmbulanceId);
+            if (amb && amb.is_free_service_eligible) {
+                requestBody.ambulance_id = selectedAmbulanceId;
+            }
         }
 
         try {
@@ -333,11 +376,7 @@ export default function Welcome({ initialActiveSosOrder = null }: { initialActiv
             });
             const data = await res.json();
             if (res.status === 201) {
-                setActiveSosOrder(data.order);
-                setMessage({
-                    type: 'success',
-                    text: `PANGGILAN DARURAT BERHASIL! Menghubungkan ke armada terdekat...`
-                });
+                router.visit(`/orders/${data.order.id}/tracking`);
             } else {
                 setMessage({ type: 'error', text: data.message || 'Gagal mengirim sinyal SOS.' });
             }
@@ -471,6 +510,37 @@ export default function Welcome({ initialActiveSosOrder = null }: { initialActiv
         }
     };
 
+    // Tentukan perutean dinamis untuk peta homepage jika ada SOS aktif
+    let routingBetween: any = null;
+    if (activeSosOrder && activeSosOrder.ambulance) {
+        const userCoords: [number, number] = [
+            activeSosOrder.pickup_latitude ? parseFloat(activeSosOrder.pickup_latitude) : -6.917,
+            activeSosOrder.pickup_longitude ? parseFloat(activeSosOrder.pickup_longitude) : 107.619
+        ];
+        const ambCoords: [number, number] = [
+            activeSosOrder.ambulance.latitude ? parseFloat(activeSosOrder.ambulance.latitude) : -6.917,
+            activeSosOrder.ambulance.longitude ? parseFloat(activeSosOrder.ambulance.longitude) : 107.619
+        ];
+        const destCoordsVal: [number, number] | null = activeSosOrder.destination_latitude ? [
+            parseFloat(activeSosOrder.destination_latitude),
+            parseFloat(activeSosOrder.destination_longitude)
+        ] : null;
+
+        if (['confirmed', 'on_the_way', 'arrived'].includes(activeSosOrder.status)) {
+            routingBetween = {
+                start: ambCoords,
+                end: userCoords,
+                color: '#D9383A' // Merah menuju jemput
+            };
+        } else if (activeSosOrder.status === 'transporting' && destCoordsVal) {
+            routingBetween = {
+                start: ambCoords,
+                end: destCoordsVal,
+                color: '#0D9488' // Teal menuju RS
+            };
+        }
+    }
+
     return (
         <AppLayout activeMenu="booking">
             <Head title="AMBUFIND - Layanan Ambulans Terintegrasi Bandung" />
@@ -504,7 +574,7 @@ export default function Welcome({ initialActiveSosOrder = null }: { initialActiv
                     {/* KOLOM KIRI: MAP VIEW */}
                     <div className="lg:col-span-7 bg-[#E5E7EB] min-h-[400px] lg:min-h-[550px] relative overflow-hidden flex flex-col">
                         <div className="flex-1 w-full h-full relative z-0">
-                            <Map center={userLocation} zoom={mapZoom} markers={mapMarkers} />
+                            <Map center={userLocation} zoom={mapZoom} markers={mapMarkers} routingBetween={routingBetween} />
                         </div>
                         <span className="absolute bottom-4 left-4 text-xs font-mono text-gray-500 bg-white/80 px-2 py-1 z-10 border border-gray-200/50 shadow-sm">[ Simulasi Radar Peta Digital ]</span>
                     </div>
@@ -685,13 +755,37 @@ export default function Welcome({ initialActiveSosOrder = null }: { initialActiv
                                     </div>
 
                                     <div className="pt-4 space-y-3">
+                                        {!currentUser && (
+                                            <div className="bg-red-50/50 border border-red-200 p-4 space-y-2 mb-3">
+                                                <label className="block text-[10px] font-bold text-red-900 uppercase tracking-widest">
+                                                    Nomor HP Koordinasi Darurat (Wajib)
+                                                </label>
+                                                <input 
+                                                    type="tel" 
+                                                    placeholder="Contoh: 081234567890"
+                                                    value={guestPhone}
+                                                    onChange={(e) => setGuestPhone(e.target.value)}
+                                                    className="w-full border border-red-300 px-3 py-2 text-xs font-mono tracking-wider focus:outline-none focus:border-red-650 bg-white"
+                                                />
+                                                <span className="text-[9px] text-gray-500 uppercase block font-semibold leading-tight">
+                                                    * Digunakan driver untuk menghubungi Anda setibanya di lokasi.
+                                                </span>
+                                            </div>
+                                        )}
+
                                         {selectedAmbulance.category === 'emergency' ? (
-                                            <button 
-                                                onClick={handleSosDispatch}
-                                                className="w-full bg-[#D9383A] text-white py-4 text-xs font-bold tracking-widest uppercase hover:bg-red-700 transition"
-                                            >
-                                                Panggil SOS Unit Ini Sekarang
-                                            </button>
+                                            selectedAmbulance.is_free_service_eligible ? (
+                                                <button 
+                                                    onClick={handleSosDispatch}
+                                                    className="w-full bg-[#D9383A] text-white py-4 text-xs font-bold tracking-widest uppercase hover:bg-red-700 transition"
+                                                >
+                                                    Panggil SOS Unit Ini Sekarang
+                                                </button>
+                                            ) : (
+                                                <div className="p-3 bg-amber-50 text-amber-800 text-[10px] font-bold text-center border border-amber-250 font-mono">
+                                                    [ ARMADA SWASTA BERBAYAR. TIDAK MELAYANI PANGGILAN SOS GRATIS ]
+                                                </div>
+                                            )
                                         ) : (
                                             <div className="flex gap-2 w-full">
                                                 <button 
@@ -703,12 +797,18 @@ export default function Welcome({ initialActiveSosOrder = null }: { initialActiv
                                                 >
                                                     Gunakan Untuk Sewa Terjadwal
                                                 </button>
-                                                <button 
-                                                    onClick={handleSosDispatch}
-                                                    className="flex-1 bg-[#D9383A] text-white py-4 text-[10px] font-bold tracking-widest uppercase hover:bg-red-700 transition text-center"
-                                                >
-                                                    Panggil SOS Unit Ini
-                                                </button>
+                                                {selectedAmbulance.is_free_service_eligible ? (
+                                                    <button 
+                                                        onClick={handleSosDispatch}
+                                                        className="flex-1 bg-[#D9383A] text-white py-4 text-[10px] font-bold tracking-widest uppercase hover:bg-red-700 transition text-center"
+                                                    >
+                                                        Panggil SOS Unit Ini
+                                                    </button>
+                                                ) : (
+                                                    <div className="flex-1 p-2 bg-amber-50 text-amber-800 text-[9px] font-bold text-center border border-amber-250 flex items-center justify-center font-mono">
+                                                        [ BERBAYAR (TIDAK ADA SOS) ]
+                                                    </div>
+                                                )}
                                             </div>
                                         )}
                                         <button 
@@ -762,6 +862,24 @@ export default function Welcome({ initialActiveSosOrder = null }: { initialActiv
                                             {sosAddressValidated && (
                                                 <span className="text-[10px] text-emerald-600 font-bold font-mono uppercase block">✓ Lokasi darurat terverifikasi</span>
                                             )}
+                                        </div>
+                                    )}
+
+                                    {!currentUser && (
+                                        <div className="bg-red-50/50 border border-red-200 p-4 space-y-2 mt-4">
+                                            <label className="block text-[10px] font-bold text-red-900 uppercase tracking-widest">
+                                                Nomor HP Koordinasi Darurat (Wajib)
+                                            </label>
+                                            <input 
+                                                type="tel" 
+                                                placeholder="Contoh: 081234567890"
+                                                value={guestPhone}
+                                                onChange={(e) => setGuestPhone(e.target.value)}
+                                                className="w-full border border-red-300 px-3 py-2 text-xs font-mono tracking-wider focus:outline-none focus:border-red-650 bg-white"
+                                            />
+                                            <span className="text-[9px] text-gray-500 uppercase block font-semibold leading-tight">
+                                                * Digunakan driver untuk menghubungi Anda setibanya di lokasi.
+                                            </span>
                                         </div>
                                     )}
 

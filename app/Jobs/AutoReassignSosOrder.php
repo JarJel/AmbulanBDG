@@ -63,6 +63,15 @@ class AutoReassignSosOrder implements ShouldQueue
                     'response_time_seconds' => 30, // SLA limit
                 ]);
 
+            // Broadcast SLA breach alert to Dinkes (Super Admin) & Institution Admin
+            $prevAmbulance = Ambulance::find($this->previousAmbulanceId);
+            $plateNumber = $prevAmbulance ? $prevAmbulance->plate_number : 'armada';
+            try {
+                broadcast(new \App\Events\SlaBreached($order, "Driver unit {$plateNumber} tidak merespons panggilan darurat SOS #{$order->id} dalam waktu 30 detik (SLA breach)."));
+            } catch (\Exception $e) {
+                \Illuminate\Support\Facades\Log::warning("Gagal menyiarkan SLA breach broadcast: " . $e->getMessage());
+            }
+
             // Track this history change
             TripStatusHistory::create([
                 'order_id' => $order->id,

@@ -25,7 +25,9 @@ class OrderController extends Controller
         $order = Order::with([
             'ambulance.institution',
             'ambulance.currentDriver',
-            'ambulance.currentNurse'
+            'ambulance.currentNurse',
+            'patientDetail',
+            'payment'
         ])->findOrFail($id);
 
         // Inject order pickup coordinates
@@ -399,7 +401,7 @@ class OrderController extends Controller
             return response()->json([
                 'status' => 'success',
                 'message' => "Status perjalanan berhasil diperbarui menjadi {$newStatus}.",
-                'order' => $order,
+                'order' => $this->loadOrderWithCoords($order->id),
             ]);
         });
     }
@@ -481,13 +483,17 @@ class OrderController extends Controller
             }
 
             // 3. Broadcast lokasi terbaru via WebSocket
-            event(new AmbulanceLocationUpdated(
-                $order->id,
-                $order->ambulance_id,
-                $latitude,
-                $longitude,
-                $bearing
-            ));
+            try {
+                event(new AmbulanceLocationUpdated(
+                    $order->id,
+                    $order->ambulance_id,
+                    $latitude,
+                    $longitude,
+                    $bearing
+                ));
+            } catch (\Exception $e) {
+                \Illuminate\Support\Facades\Log::warning("WebSocket broadcast failed: " . $e->getMessage());
+            }
 
             return response()->json([
                 'status' => 'success',
@@ -551,13 +557,326 @@ class OrderController extends Controller
             }
 
             // Broadcast real-time update using TripStatusUpdated event
-            broadcast(new \App\Events\TripStatusUpdated($order));
+            try {
+                broadcast(new \App\Events\TripStatusUpdated($order));
+            } catch (\Exception $e) {
+                \Illuminate\Support\Facades\Log::warning("WebSocket broadcast failed: " . $e->getMessage());
+            }
 
             return response()->json([
                 'status' => 'success',
                 'message' => 'Panggilan darurat berhasil Anda terima.',
-                'order' => $order,
+                'order' => $this->loadOrderWithCoords($order->id),
             ]);
         });
+    }
+
+    /**
+     * Update the patient medical condition/notes.
+     */
+    public function postUpdatePatientCondition(Request $request, $id)
+    {
+        $validator = Validator::make($request->all(), [
+            'patient_condition' => 'required|string',
+        ]);
+
+        if ($validator->fails()) {
+            return response()->json(['errors' => $validator->errors()], 422);
+        }
+
+        $order = Order::findOrFail($id);
+
+        $order->update([
+            'patient_condition' => $request->patient_condition,
+        ]);
+
+        // Broadcast update
+        try {
+            broadcast(new \App\Events\TripStatusUpdated($order));
+        } catch (\Exception $e) {
+            \Illuminate\Support\Facades\Log::warning("WebSocket broadcast failed: " . $e->getMessage());
+        }
+
+        return response()->json([
+            'status' => 'success',
+            'message' => 'Catatan kondisi pasien berhasil diperbarui.',
+            'order' => $this->loadOrderWithCoords($id),
+        ]);
+    }
+
+    /**
+     * Jalur SOS/Darurat Guest (Tanpa Login).
+     */
+    public function postSosOrderGuest(Request $request, \App\Services\SosDispatchService $dispatcher)
+    {
+        $validator = Validator::make($request->all(), [
+            'pickup_latitude' => 'required|numeric',
+            'pickup_longitude' => 'required|numeric',
+            'pickup_address' => 'required|string',
+            'guest_phone' => ['required', 'string', 'regex:/^(\+62|62|0)8[1-9][0-9]{6,11}$/'],
+            'ambulance_id' => 'nullable|exists:ambulances,id',
+        ], [
+            'guest_phone.regex' => 'Format nomor HP tidak valid (gunakan format Indonesia seperti 08xxxxxxxxxx atau 628xxxxxxxxxx).'
+        ]);
+
+        if ($validator->fails()) {
+            return response()->json(['errors' => $validator->errors()], 422);
+        }
+
+        // Hourly rate limiting per guest phone number
+        $phoneKey = 'sos_guest_phone_limit:' . $request->guest_phone;
+        if (\Illuminate\Support\Facades\RateLimiter::tooManyAttempts($phoneKey, 3)) {
+            return response()->json([
+                'status' => 'error',
+                'message' => 'Terlalu banyak permintaan SOS dari nomor HP ini. Silakan hubungi 119/112.'
+            ], 429);
+        }
+        \Illuminate\Support\Facades\RateLimiter::hit($phoneKey, 3600); // 1 jam (3600 detik)
+
+        $latitude = $request->pickup_latitude;
+        $longitude = $request->pickup_longitude;
+        $token = (string) \Illuminate\Support\Str::uuid();
+
+        // 1. Create a pending SOS order first
+        $order = Order::create([
+            'user_id' => null,
+            'ambulance_id' => null,
+            'order_type' => 'SOS',
+            'status' => 'pending',
+            'pickup_location' => DB::raw("Point({$longitude}, {$latitude})"),
+            'pickup_address' => $request->pickup_address,
+            'fare_amount' => 0.00,
+            'guest_phone' => $request->guest_phone,
+            'guest_session_token' => $token,
+            'guest_token_expires_at' => now()->addHours(24),
+        ]);
+
+        // 2. Dispatch using the service with locked query, passing optional selected ambulance_id
+        $ambulance = $dispatcher->dispatch($order, [], $request->ambulance_id);
+
+        if (!$ambulance) {
+            $order->update(['status' => 'no_ambulance_available']);
+
+            TripStatusHistory::create([
+                'order_id' => $order->id,
+                'status' => 'no_ambulance_available',
+                'changed_at' => now(),
+            ]);
+
+            return response()->json([
+                'status' => 'no_ambulance_available',
+                'message' => 'Tidak ada ambulans standby di radar. Silakan hubungi 112 atau 119.',
+                'fallback_number' => '112',
+            ], 404);
+        }
+
+        return response()->json([
+            'status' => 'success',
+            'message' => 'Panggilan darurat tamu terkirim. Menunggu konfirmasi driver.',
+            'order' => $this->loadOrderWithCoords($order->id),
+            'guest_session_token' => $token,
+        ], 201);
+    }
+
+    /**
+     * Menyimpan atau memperbarui data medis pasien untuk order tertentu.
+     */
+    public function postSavePatientDetails(Request $request, $id)
+    {
+        $validator = Validator::make($request->all(), [
+            'patient_name' => 'required|string',
+            'patient_age' => 'nullable|integer|min:0|max:150',
+            'condition_notes' => 'nullable|string',
+            'secondary_emergency_contact' => 'nullable|string',
+            'guest_session_token' => 'nullable|string',
+        ]);
+
+        if ($validator->fails()) {
+            return response()->json(['errors' => $validator->errors()], 422);
+        }
+
+        $order = Order::findOrFail($id);
+
+        // Otorisasi: check jika milik user terdaftar, ATAU check guest_session_token
+        if ($order->user_id) {
+            if (!auth()->check() || auth()->id() !== $order->user_id) {
+                return response()->json(['message' => 'Akses ditolak.'], 403);
+            }
+        } else {
+            $token = $request->input('guest_session_token') ?? $request->header('X-Guest-Token');
+            if (!$token || $order->guest_session_token !== $token) {
+                return response()->json(['message' => 'Akses ditolak. Token tidak valid.'], 403);
+            }
+        }
+
+        $detail = \App\Models\PatientDetail::updateOrCreate(
+            ['order_id' => $order->id],
+            [
+                'patient_name' => $request->patient_name,
+                'patient_age' => $request->patient_age,
+                'condition_notes' => $request->condition_notes,
+                'secondary_emergency_contact' => $request->secondary_emergency_contact,
+            ]
+        );
+
+        // Broadcast status update
+        try {
+            $orderFresh = $this->loadOrderWithCoords($order->id);
+            broadcast(new \App\Events\TripStatusUpdated($orderFresh));
+        } catch (\Exception $e) {
+            \Illuminate\Support\Facades\Log::warning("WebSocket broadcast failed: " . $e->getMessage());
+        }
+
+        return response()->json([
+            'status' => 'success',
+            'message' => 'Data pasien berhasil disimpan.',
+            'patient_detail' => $detail,
+        ]);
+    }
+
+    /**
+     * Melakukan pembayaran DP inline bagi guest.
+     */
+    public function postSavePaymentGuest(Request $request, $id)
+    {
+        $validator = Validator::make($request->all(), [
+            'method' => 'required|in:qris,e-wallet,transfer,cash',
+            'amount' => 'required|numeric|min:0',
+            'guest_session_token' => 'required|string',
+        ]);
+
+        if ($validator->fails()) {
+            return response()->json(['errors' => $validator->errors()], 422);
+        }
+
+        $order = Order::findOrFail($id);
+
+        if ($order->guest_session_token !== $request->guest_session_token) {
+            return response()->json(['message' => 'Akses ditolak. Token tidak valid.'], 403);
+        }
+
+        $payment = \App\Models\Payment::updateOrCreate(
+            ['order_id' => $order->id],
+            [
+                'method' => $request->method,
+                'amount' => $request->amount,
+                'status' => 'paid',
+                'payment_gateway_transaction_id' => 'GUEST-TX-' . time() . '-' . rand(1000, 9999),
+            ]
+        );
+
+        // Broadcast status update
+        try {
+            $orderFresh = $this->loadOrderWithCoords($order->id);
+            broadcast(new \App\Events\TripStatusUpdated($orderFresh));
+        } catch (\Exception $e) {
+            \Illuminate\Support\Facades\Log::warning("WebSocket broadcast failed: " . $e->getMessage());
+        }
+
+        return response()->json([
+            'status' => 'success',
+            'message' => 'Pembayaran berhasil diproses.',
+            'payment' => $payment,
+        ]);
+    }
+
+    /**
+     * Konversi data guest ke akun permanen pasca trip selesai.
+     */
+    public function postRegisterGuestAccount(Request $request, $id)
+    {
+        $validator = Validator::make($request->all(), [
+            'name' => 'required|string|max:255',
+            'email' => 'required|string|email|max:255|unique:users',
+            'password' => 'required|string|min:8',
+            'guest_session_token' => 'required|string',
+        ]);
+
+        if ($validator->fails()) {
+            return response()->json(['errors' => $validator->errors()], 422);
+        }
+
+        $order = Order::findOrFail($id);
+
+        if ($order->guest_session_token !== $request->guest_session_token) {
+            return response()->json(['message' => 'Akses ditolak. Token tidak valid.'], 403);
+        }
+
+        // Cek jika nomor HP sudah terdaftar
+        $existingUser = User::where('phone', $order->guest_phone)->first();
+        if ($existingUser) {
+            return response()->json(['message' => 'Nomor HP ini sudah terdaftar sebagai pengguna.'], 422);
+        }
+
+        // Buat User Baru
+        $user = User::create([
+            'name' => $request->name,
+            'email' => $request->email,
+            'phone' => $order->guest_phone,
+            'password' => bcrypt($request->password),
+            'role' => 'customer',
+        ]);
+
+        // Hubungkan semua order ber-nomor HP sama ke user terdaftar ini
+        Order::where('guest_phone', $order->guest_phone)->update([
+            'user_id' => $user->id,
+        ]);
+
+        // Login kan secara otomatis
+        auth()->login($user);
+
+        return response()->json([
+            'status' => 'success',
+            'message' => 'Akun Anda berhasil didaftarkan. Selamat datang di AmbulanBDG!',
+        ]);
+    }
+
+    /**
+     * Ekspor Ringkasan Perjalanan & Rekam Medis IGD (PDF / Print-ready HTML).
+     */
+    public function getExportSummary(Request $request, $id)
+    {
+        $order = Order::with(['ambulance.institution', 'ambulance.currentDriver', 'ambulance.currentNurse', 'patientDetail', 'payment', 'rating'])
+            ->findOrFail($id);
+
+        // Otorisasi sederhana: Pemilik order, kru ditugaskan, fasyankes pemilik, atau Super Admin
+        $user = $request->user();
+        if ($user) {
+            $isAuthorized = ($order->user_id === $user->id) || 
+                            ($order->ambulance && $order->ambulance->current_driver_id === $user->id) ||
+                            ($order->ambulance && $order->ambulance->current_nurse_id === $user->id) ||
+                            ($order->ambulance && $order->ambulance->institution_id === $user->institution_id) ||
+                            ($user->role === 'super_admin');
+            
+            if (!$isAuthorized) {
+                abort(403, 'Akses ditolak.');
+            }
+        } else {
+            // Validasi via Token untuk Guest
+            $token = $request->query('token') ?? $request->header('X-Guest-Token');
+            if ($order->guest_session_token !== $token) {
+                abort(403, 'Akses ditolak.');
+            }
+        }
+
+        // Ambil koordinat
+        $coords = DB::selectOne("
+            SELECT 
+                ST_X(pickup_location) as pickup_lng, 
+                ST_Y(pickup_location) as pickup_lat,
+                ST_X(destination_location) as dest_lng,
+                ST_Y(destination_location) as dest_lat
+            FROM orders 
+            WHERE id = ?
+        ", [$id]);
+
+        if ($coords) {
+            $order->pickup_latitude = $coords->pickup_lat;
+            $order->pickup_longitude = $coords->pickup_lng;
+            $order->destination_latitude = $coords->dest_lat;
+            $order->destination_longitude = $coords->dest_lng;
+        }
+
+        return view('orders.export_summary', ['order' => $order]);
     }
 }

@@ -7,7 +7,11 @@ use Illuminate\Database\Eloquent\Attributes\Hidden;
 use Illuminate\Database\Eloquent\Factories\HasFactory;
 use Illuminate\Database\Eloquent\Model;
 
-#[Fillable(['institution_id', 'plate_number', 'category', 'status', 'current_driver_id', 'current_nurse_id', 'current_location', 'last_location_at'])]
+#[Fillable([
+    'institution_id', 'plate_number', 'category', 'status', 'current_driver_id', 'current_nurse_id', 
+    'current_location', 'last_location_at', 'brand', 'year', 'capacity', 'is_draft', 'verification_status',
+    'base_fare', 'price_per_km', 'is_free_service_eligible'
+])]
 #[Hidden(['current_location'])]
 class Ambulance extends Model
 {
@@ -94,5 +98,29 @@ class Ambulance extends Model
     public function locationAnomalies()
     {
         return $this->hasMany(LocationAnomaly::class);
+    }
+
+    /**
+     * Get polymorphic documents.
+     */
+    public function documents()
+    {
+        return $this->morphMany(DocumentVerification::class, 'verifiable');
+    }
+
+    /**
+     * Get tariff rate change history.
+     */
+    public function rateHistories()
+    {
+        return $this->hasMany(RateHistory::class);
+    }
+
+    /**
+     * Get shift vehicle checklists.
+     */
+    public function checklists()
+    {
+        return $this->hasMany(VehicleChecklist::class);
     }
 }
